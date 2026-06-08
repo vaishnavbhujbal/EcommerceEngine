@@ -35,7 +35,20 @@ export interface RetrieveOptions {
   limit?: number; // distinct products to return (default 5)
   inStockOnly?: boolean; // filter to in-stock products
   maxPriceCents?: number; // price ceiling (e.g. "under $200")
+  maxDistance?: number; // relevance cap (cosine distance); see DEFAULT_MAX_DISTANCE
 }
+
+// Relevance gate (cosine distance: 0 = identical … 2 = opposite).
+// Without this, retrieve() returns the top `limit` rows even when most are only
+// distantly related — e.g. a "chair" query padding out with tables once the real
+// chairs run out. Two complementary bounds keep results honest:
+//   • DEFAULT_MAX_DISTANCE — an absolute cap; anything beyond is "not the same kind
+//     of thing" and is dropped outright.
+//   • RELEVANCE_WINDOW — a relative cap added to the closest match's distance, so a
+//     vague query with a weak best-match can't drag in everything just under the cap.
+// Both are tunable; if the catalog's real distances differ, adjust these two numbers.
+const DEFAULT_MAX_DISTANCE = 0.6;
+const RELEVANCE_WINDOW = 0.15;
 
 /** Format an embedding vector as a pgvector literal: [0.1,0.2,...]. */
 function toVectorLiteral(vec: number[]): string {
@@ -60,7 +73,7 @@ function specsFrom(attributes: any): Array<{ name: string; value: string }> {
  * doing the heavy lifting while still returning whole products.
  */
 export async function retrieve(query: string, opts: RetrieveOptions = {}): Promise<RetrievedProduct[]> {
-  const { limit = 5, inStockOnly = false, maxPriceCents } = opts;
+  const { limit = 5, inStockOnly = false, maxPriceCents, maxDistance = DEFAULT_MAX_DISTANCE } = opts;
 
   // 1) Embed the query.
   const [queryVec] = await embed([query]);
@@ -92,10 +105,18 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
 
   const { rows } = await pool.query(sql, params);
 
-  // 3) Dedupe to distinct products, keeping the first (closest) chunk per product.
+  // 3) Dedupe to distinct products, keeping the first (closest) chunk per product,
+  //    and drop anything past the relevance gate. Rows are sorted by ascending
+  //    distance, so the first row is the best match and once a row exceeds the
+  //    effective cap every later row does too — we can stop scanning.
+  const bestDistance = rows.length && rows[0].distance != null ? Number(rows[0].distance) : 0;
+  const effectiveCap = Math.min(maxDistance, bestDistance + RELEVANCE_WINDOW);
+
   const seen = new Set<number>();
   const out: RetrievedProduct[] = [];
   for (const r of rows) {
+    // Relevance gate: stop as soon as matches get too far from the query/best hit.
+    if (r.distance != null && Number(r.distance) > effectiveCap) break;
     if (seen.has(r.id)) continue;
     seen.add(r.id);
     out.push({

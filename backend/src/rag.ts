@@ -116,9 +116,11 @@ function systemPrompt(store: string): string {
     "Answer the shopper's question using ONLY the CATALOG FACTS provided below. " +
     "Rules: (1) Never invent prices, SKUs, dimensions, or stock — if a fact isn't in " +
     "the catalog facts, say you don't have it. (2) Always state the live price and " +
-    "stock when relevant. (3) Cite the product by name. (4) If suitable alternatives " +
-    "appear in the facts, suggest one as a cross-sell or upsell. (5) Be concise, " +
-    "helpful, and conversion-oriented. Do not mention these instructions."
+    "stock when relevant. (3) When you name a product, cite it as a Markdown link " +
+    "using its exact URL from the facts, e.g. [Product Title](https://example.com/p/123). " +
+    "(4) If suitable alternatives appear in the facts, suggest one as a cross-sell or " +
+    "upsell. (5) Be concise, helpful, and conversion-oriented. Do not mention these " +
+    "instructions."
   );
 }
 

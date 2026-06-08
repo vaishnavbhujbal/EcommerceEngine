@@ -25,6 +25,37 @@ function formatPrice(cents: number | null, currency: string | null): string {
   return `${sym}${(cents / 100).toFixed(2)}`;
 }
 
+// renderRich — turn a plain string into React nodes, making any Markdown link
+// [label](url) or bare http(s) URL a clickable <a>. Used for the grounded answer
+// (the model now cites products as Markdown links) and the web-insight bullets.
+const LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s)]+)/g;
+function renderRich(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  let m: RegExpExecArray | null;
+  LINK_RE.lastIndex = 0; // reset the shared global-flag regex before each use
+  while ((m = LINK_RE.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const label = m[1] ?? m[3]; // markdown label, else the raw URL itself
+    const href = m[2] ?? m[3];
+    nodes.push(
+      <a
+        key={key++}
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-700"
+      >
+        {label}
+      </a>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
 function StarRating({ avg, count }: { avg: number | null; count: number | null }) {
   if (avg == null) return null;
   const full = Math.round(avg);
@@ -168,7 +199,7 @@ export default function App() {
             <p className="text-sm text-slate-500">
               Grounded answers with{" "}
               <span className="font-semibold text-slate-700">live price &amp; stock</span>, real
-              reviews and specs — beat ChatGPT &amp; Perplexity on the same prompt + URL.
+              reviews and specifications
             </p>
           </div>
         </header>
@@ -235,7 +266,7 @@ export default function App() {
               <Sparkles className="h-4 w-4" /> Grounded answer
             </h2>
             <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700">
-              {answer}
+              {renderRich(answer)}
             </p>
           </section>
         )}
@@ -249,7 +280,23 @@ export default function App() {
                 external opinions · not the store's live data
               </span>
             </h2>
-            <p className="text-[15px] leading-relaxed text-slate-700">{web.text}</p>
+            <ul className="space-y-1.5">
+              {web.text
+                .split("\n")
+                // The model returns one insight per line as "- …"; strip the
+                // leading bullet marker so we can render our own styled bullets.
+                .map((line) => line.replace(/^\s*[-*•]\s*/, "").trim())
+                .filter(Boolean)
+                .map((point, i) => (
+                  <li
+                    key={i}
+                    className="flex items-start gap-2 text-[15px] leading-relaxed text-slate-700"
+                  >
+                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />
+                    <span>{renderRich(point)}</span>
+                  </li>
+                ))}
+            </ul>
             {web.sources.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-2">
                 {web.sources.map((s, i) => (

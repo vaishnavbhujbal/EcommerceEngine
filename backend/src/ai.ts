@@ -122,9 +122,11 @@ export async function webInsights(query: string): Promise<WebInsights> {
         role: "system",
         content:
           "You summarize what real buyers and reviewers across the web say about the kind " +
-          "of product the user is asking about. Give 2-3 sentences of practical buying " +
-          "insight (durability, comfort, common complaints, tips). Do NOT state specific " +
-          "prices or stock — those come from the retailer, not you. Be concise and neutral.",
+          "of product the user is asking about. Return 3-4 short bullet points of practical " +
+          "buying insight (durability, comfort, common complaints, tips) — one insight per " +
+          "bullet. Format each bullet on its own line starting with '- ' (a hyphen and a " +
+          "space); do NOT write paragraphs. Do NOT state specific prices or stock — those " +
+          "come from the retailer, not you. Be concise and neutral.",
       },
       { role: "user", content: query },
     ],
