@@ -1,0 +1,17 @@
+{
+  // TypeScript config tuned for ESM + tsx (no build step in the POC).
+  "compilerOptions": {
+    "target": "ES2022",            // modern JS features available in Node 20+
+    "lib": ["ES2023", "DOM"],     // DOM types for code inside Playwright page.evaluate()
+    "module": "NodeNext",          // emit/resolve as Node ESM (pairs with "type":"module")
+    "moduleResolution": "NodeNext", // import "./db.js" resolves db.ts under tsx
+    "strict": true,                // catch bugs early — worth it even in a POC
+    "esModuleInterop": true,       // clean default imports from CJS deps (express, pg)
+    "skipLibCheck": true,          // don't typecheck node_modules .d.ts — faster
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,     // allow importing eval/prompts.json later
+    "noEmit": true,                // tsx runs in-memory; we never emit compiled JS
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}
