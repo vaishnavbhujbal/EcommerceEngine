@@ -29,6 +29,7 @@ export interface RetrievedProduct {
   matched_chunk: string | null; // which facet matched (description|geo_content|spec|faq)
   matched_content: string | null; // the text that matched (helps grounding)
   distance: number | null; // cosine distance (lower = closer)
+  crawled_at: string | null; // ISO timestamp of the last crawl — powers the "verified live" badge
 }
 
 export interface RetrieveOptions {
@@ -59,6 +60,13 @@ function toVectorLiteral(vec: number[]): string {
 function specsFrom(attributes: any): Array<{ name: string; value: string }> {
   if (attributes && Array.isArray(attributes.specs)) return attributes.specs;
   return [];
+}
+
+/** Normalize a pg timestamp (Date or string) to an ISO string, or null. */
+function toIso(ts: any): string | null {
+  if (!ts) return null;
+  const d = ts instanceof Date ? ts : new Date(ts);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +102,7 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
   const sql = `
     SELECT p.id, p.source_url, p.title, p.brand, p.description, p.price_cents,
            p.currency, p.in_stock, p.rating_avg, p.rating_count, p.use_cases,
-           p.attributes,
+           p.attributes, p.crawled_at,
            e.chunk_type AS matched_chunk, e.content AS matched_content,
            (e.embedding <=> $1::vector) AS distance
     FROM embeddings e
@@ -135,6 +143,7 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
       matched_chunk: r.matched_chunk,
       matched_content: r.matched_content,
       distance: r.distance != null ? Number(r.distance) : null,
+      crawled_at: toIso(r.crawled_at),
     });
     if (out.length >= limit) break;
   }
@@ -156,7 +165,7 @@ export interface AnchorProduct extends RetrievedProduct {
 export async function getProductByUrl(url: string): Promise<AnchorProduct | null> {
   const { rows } = await pool.query(
     `SELECT id, source_url, title, brand, description, price_cents, currency,
-            in_stock, rating_avg, rating_count, use_cases, attributes
+            in_stock, rating_avg, rating_count, use_cases, attributes, crawled_at
      FROM products WHERE source_url = $1`,
     [url]
   );
@@ -184,6 +193,7 @@ export async function getProductByUrl(url: string): Promise<AnchorProduct | null
     matched_chunk: null,
     matched_content: null,
     distance: null,
+    crawled_at: toIso(r.crawled_at),
     aeo: aeo.rows,
   };
 }
@@ -200,7 +210,7 @@ export async function mostPopular(limit = 5, inStockOnly = false): Promise<Retri
   const where = inStockOnly ? "WHERE rating_count IS NOT NULL AND in_stock = true" : "WHERE rating_count IS NOT NULL";
   const { rows } = await pool.query(
     `SELECT id, source_url, title, brand, description, price_cents, currency,
-            in_stock, rating_avg, rating_count, use_cases, attributes
+            in_stock, rating_avg, rating_count, use_cases, attributes, crawled_at
      FROM products
      ${where}
      ORDER BY rating_count DESC
@@ -223,5 +233,6 @@ export async function mostPopular(limit = 5, inStockOnly = false): Promise<Retri
     matched_chunk: null,
     matched_content: null,
     distance: null,
+    crawled_at: toIso(r.crawled_at),
   }));
 }

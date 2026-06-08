@@ -40,12 +40,12 @@ router.post("/chat", async (req, res) => {
   }
 
   initSse(res);
-  const onProgress: ProgressFn = (e) => send(res, { type: "progress", ...e });
+  // answer() streams its own typed events (meta → delta… → web) through emit.
+  const emit = (event: Record<string, unknown>) => send(res, event);
 
   try {
     const anchorUrl = typeof url === "string" && url.trim() ? url.trim() : undefined;
-    const result = await answer(query, anchorUrl, onProgress);
-    send(res, { type: "result", ...result });
+    await answer(query, anchorUrl, emit);
   } catch (err) {
     console.error("/chat error:", err);
     send(res, { type: "error", message: (err as Error).message });

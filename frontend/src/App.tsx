@@ -14,6 +14,8 @@ import {
   Check,
   AlertCircle,
   Globe,
+  ShieldCheck,
+  Clock,
 } from "lucide-react";
 import { postChat, type ChatEvent, type ProductCard, type WebInsights } from "./api";
 
@@ -54,6 +56,25 @@ function renderRich(text: string): React.ReactNode[] {
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
+}
+
+// verifiedLabel — turn a crawl timestamp into an honest freshness label. We only
+// claim "Verified live" when the crawl was within ~2 minutes (the anchor and live
+// search results are re-crawled at answer-time); older cached cards say how long
+// ago they were checked. This is the thing a generic LLM can never show.
+function verifiedLabel(iso: string | null): { text: string; live: boolean } | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const ageMin = Math.floor((Date.now() - t) / 60000);
+  if (ageMin <= 2) {
+    const time = new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return { text: `Verified live · ${time}`, live: true };
+  }
+  if (ageMin < 60) return { text: `Checked ${ageMin}m ago`, live: false };
+  const ageHr = Math.floor(ageMin / 60);
+  if (ageHr < 24) return { text: `Checked ${ageHr}h ago`, live: false };
+  return { text: `Checked ${Math.floor(ageHr / 24)}d ago`, live: false };
 }
 
 function StarRating({ avg, count }: { avg: number | null; count: number | null }) {
@@ -121,6 +142,23 @@ function Card({ p }: { p: ProductCard }) {
         <StarRating avg={p.rating_avg} count={p.rating_count} />
       </div>
 
+      {/* Live-verified badge — the trust signal a generic LLM can't produce */}
+      {(() => {
+        const v = verifiedLabel(p.verified_at);
+        if (!v) return null;
+        return (
+          <div
+            className={`mt-2 inline-flex items-center gap-1 text-[11px] font-medium ${
+              v.live ? "text-emerald-600" : "text-slate-400"
+            }`}
+            title={p.verified_at ?? undefined}
+          >
+            {v.live ? <ShieldCheck className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />}
+            {v.text}
+          </div>
+        );
+      })()}
+
       {/* Highlights as bullet points */}
       {highlights.length > 0 && (
         <ul className="mt-4 space-y-1.5 border-t border-slate-100 pt-3">
@@ -167,9 +205,15 @@ export default function App() {
 
     await postChat({ query: query.trim(), url: url.trim() || undefined }, (e: ChatEvent) => {
       if (e.type === "progress") setPhase(e.message);
-      else if (e.type === "result") {
-        setAnswer(e.answer);
+      else if (e.type === "meta") {
+        // Cards + intent arrive first; render them and clear any prior prose so
+        // the incoming deltas stream into a fresh answer.
         setProducts(e.products);
+        setAnswer("");
+      } else if (e.type === "delta") {
+        // Append each token — functional update keeps rapid deltas correct.
+        setAnswer((prev) => prev + e.text);
+      } else if (e.type === "web") {
         setWeb(e.webInsights);
       } else if (e.type === "error") setError(e.message);
       else if (e.type === "done") {
@@ -188,7 +232,7 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl px-4 py-10 sm:py-14">
         {/* Header */}
-        <header className="mb-8 flex items-center gap-3">
+        <header className="mb-8 flex flex-col items-center gap-3 text-center">
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-200">
             <ShoppingBag className="h-6 w-6" />
           </div>
@@ -267,6 +311,9 @@ export default function App() {
             </h2>
             <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700">
               {renderRich(answer)}
+              {loading && (
+                <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-indigo-500 align-text-bottom" />
+              )}
             </p>
           </section>
         )}

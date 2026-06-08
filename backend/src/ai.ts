@@ -96,6 +96,45 @@ export async function complete(opts: CompleteOptions): Promise<string> {
   return response.choices[0]?.message?.content ?? "";
 }
 
+/**
+ * completeStream — like complete(), but streams the answer token-by-token.
+ *
+ * Invokes onToken(delta) for each incremental chunk as it arrives, and returns the
+ * full concatenated text once the stream closes — so callers (rag.ts) can both
+ * stream to the UI AND keep the finished answer. This is what gives the frontend
+ * its "typing" effect, the way ChatGPT/Perplexity feel.
+ *
+ * No JSON mode here on purpose: we only ever stream the conversational prose
+ * answer. Structured (json:true) calls stay on complete().
+ */
+export async function completeStream(
+  opts: Omit<CompleteOptions, "json">,
+  onToken: (delta: string) => void
+): Promise<string> {
+  const { system, user, temperature = 0.2 } = opts;
+
+  const stream = await openai.chat.completions.create({
+    model: CHAT_MODEL,
+    temperature,
+    stream: true, // ask the SDK for an async iterable of partial chunks
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  let full = "";
+  for await (const chunk of stream) {
+    // Each chunk carries a small delta (often a few characters); concatenate.
+    const delta = chunk.choices[0]?.delta?.content ?? "";
+    if (delta) {
+      full += delta;
+      onToken(delta);
+    }
+  }
+  return full;
+}
+
 // Model with built-in web search (reuses our OpenAI key — no separate search API).
 const SEARCH_MODEL = "gpt-4o-search-preview";
 

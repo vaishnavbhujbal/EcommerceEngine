@@ -17,6 +17,7 @@ export interface ProductCard {
   rating_count: number | null;
   role: "anchor" | "alternative";
   highlights: string[];
+  verified_at: string | null; // ISO timestamp of the last crawl → "verified live" badge
 }
 
 export interface WebInsights {
@@ -24,16 +25,15 @@ export interface WebInsights {
   sources: { url: string; title: string }[];
 }
 
-// Mirrors the events routes.ts emits.
+// Mirrors the events routes.ts / rag.ts emit. The answer now streams:
+//   meta  → intent + product cards (render immediately)
+//   delta → incremental answer text (append for the typewriter effect)
+//   web   → "what the web says" (arrives once the parallel search resolves)
 export type ChatEvent =
   | { type: "progress"; phase: string; message: string }
-  | {
-      type: "result";
-      intent: string;
-      answer: string;
-      products: ProductCard[];
-      webInsights: WebInsights | null;
-    }
+  | { type: "meta"; intent: string; products: ProductCard[] }
+  | { type: "delta"; text: string }
+  | { type: "web"; webInsights: WebInsights | null }
   | { type: "error"; message: string }
   | { type: "done" };
 
