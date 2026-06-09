@@ -192,6 +192,7 @@ export async function answer(
       limit: RESULT_LIMIT,
       maxPriceCents: parseMaxPriceCents(query),
       inStockOnly: wantsInStock(query),
+      rerankResults: true, // hybrid (vector+keyword) → LLM re-rank for final order
     });
   }
   // Don't list the anchor twice.

@@ -135,6 +135,70 @@ export async function completeStream(
   return full;
 }
 
+// Cheap model used only to re-rank retrieval candidates (not to write answers).
+const RERANK_MODEL = "gpt-4o-mini";
+
+/** One candidate document handed to the re-ranker. */
+export interface RerankCandidate {
+  id: number;
+  text: string; // a compact representation: title + short snippet
+}
+
+/**
+ * rerank — order candidate products by relevance to the query, best-first.
+ *
+ * Hybrid retrieval (vector + keyword) is good at *recall* — pulling the right set
+ * into the top-K — but its ordering is a blend of two heuristics. A small LLM that
+ * actually reads query + candidate text gives sharper *precision* on the final order.
+ *
+ * Returns the candidate ids in ranked order. It is defensive by design: any error,
+ * timeout, or malformed output falls back to the input order, so re-ranking can
+ * never break or drop a result — it can only improve the ordering.
+ */
+export async function rerank(query: string, candidates: RerankCandidate[]): Promise<number[]> {
+  // Nothing to reorder.
+  if (candidates.length <= 1) return candidates.map((c) => c.id);
+
+  const list = candidates.map((c) => `(id=${c.id}) ${c.text}`).join("\n");
+  try {
+    const response = await openai.chat.completions.create({
+      model: RERANK_MODEL,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a search re-ranker for an ecommerce catalog. Given a shopper query " +
+            "and candidate products, order the candidates from MOST to LEAST relevant to " +
+            "the query. Return ONLY a JSON object of the form {\"order\": [id, id, ...]} " +
+            "containing every candidate id exactly once, most relevant first. Do not invent ids.",
+        },
+        { role: "user", content: `Query: ${query}\n\nCandidates:\n${list}` },
+      ],
+    });
+
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    const order: number[] = Array.isArray(parsed.order) ? parsed.order.map(Number) : [];
+
+    // Sanitize: keep only known ids, de-duped, then append any the model omitted so
+    // we never silently lose a candidate.
+    const valid = new Set(candidates.map((c) => c.id));
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const id of order) {
+      if (valid.has(id) && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    for (const c of candidates) if (!seen.has(c.id)) out.push(c.id);
+    return out;
+  } catch {
+    return candidates.map((c) => c.id); // fall back to the fused order
+  }
+}
+
 // Model with built-in web search (reuses our OpenAI key — no separate search API).
 const SEARCH_MODEL = "gpt-4o-search-preview";
 
