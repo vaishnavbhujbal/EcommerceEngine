@@ -35,6 +35,7 @@ export interface CrawledProduct {
   rating_count: number | null; // powers the "Most Popular" signal
   image: string | null;
   specs: ProductSpec[]; // material/dimension facts — enables exact, grounded answers
+  reviews: CrawledReview[]; // real buyer reviews — ground AEO Q&A in actual buyer language
   extraction_method: "json-ld" | "dom"; // which path produced the data (debugging)
 }
 
@@ -42,6 +43,14 @@ export interface CrawledProduct {
 export interface ProductSpec {
   name: string;
   value: string;
+}
+
+/** One crawled customer review. body is always present; the rest are best-effort. */
+export interface CrawledReview {
+  author: string | null;
+  title: string | null;
+  body: string;
+  rating: number | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +177,51 @@ export async function crawlPdp(url: string): Promise<CrawledProduct> {
         .slice(0, 15);
     });
 
+    // Reviews: prefer structured JSON-LD Review objects; fall back to a best-effort
+    // DOM scrape of review cards. Body text is what matters — it grounds AEO Q&A in
+    // real buyer language and fills the reviews table.
+    const reviews = await page.evaluate(() => {
+      const out: { author: string | null; title: string | null; body: string; rating: number | null }[] = [];
+
+      // (a) JSON-LD Review[] attached to the Product.
+      for (const node of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+        try {
+          const data = JSON.parse(node.textContent || "");
+          const candidates = Array.isArray(data) ? data : (data as any)["@graph"] || [data];
+          for (const obj of candidates) {
+            const raw = obj && (obj as any).review;
+            const revs = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+            for (const r of revs) {
+              const body = String(r.reviewBody ?? r.description ?? "").replace(/\s+/g, " ").trim();
+              if (!body) continue;
+              const author = r.author?.name ?? (typeof r.author === "string" ? r.author : null);
+              out.push({
+                author: author ?? null,
+                title: r.name ? String(r.name) : null,
+                body,
+                rating: r.reviewRating?.ratingValue != null ? Number(r.reviewRating.ratingValue) : null,
+              });
+            }
+          }
+        } catch {
+          /* ignore malformed JSON-LD */
+        }
+      }
+      if (out.length) return out.slice(0, 20);
+
+      // (b) DOM fallback. Keep only "leaf" review nodes (those NOT containing another
+      // review node) to avoid the nested duplicates a broad class match produces.
+      const seen = new Set<string>();
+      for (const n of Array.from(document.querySelectorAll('[class*="review" i],[data-testid*="review" i]'))) {
+        if (n.querySelector('[class*="review" i]')) continue;
+        const text = ((n as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+        if (text.length < 40 || text.length > 800 || seen.has(text)) continue;
+        seen.add(text);
+        out.push({ author: null, title: null, body: text, rating: null });
+      }
+      return out.slice(0, 20);
+    });
+
     // 1) Try JSON-LD. Runs in the page context; returns a plain object or null.
     const fromJsonLd = await page.evaluate(() => {
       for (const node of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
@@ -216,6 +270,7 @@ export async function crawlPdp(url: string): Promise<CrawledProduct> {
         rating_count: fromJsonLd.reviewCount != null ? Number(fromJsonLd.reviewCount) : null,
         image: pickImage(fromJsonLd.image),
         specs,
+        reviews,
         extraction_method: "json-ld",
       };
     }
@@ -251,6 +306,7 @@ export async function crawlPdp(url: string): Promise<CrawledProduct> {
       rating_count: null,
       image: fromDom.image,
       specs,
+      reviews,
       extraction_method: "dom",
     };
   } finally {

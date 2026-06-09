@@ -16,6 +16,7 @@ import {
   crawlPdp,
   discoverProductUrls,
   type CrawledProduct,
+  type CrawledReview,
   type ProductSpec,
 } from "./crawler.js";
 import { getAdapter, type SiteAdapter } from "./sites.js";
@@ -152,6 +153,10 @@ export async function ingestProduct(
   const productId = await upsertProduct(crawled);
   onProgress({ phase: "store", message: `Stored "${crawled.title}"`, productId });
 
+  // 1b) Persist crawled buyer reviews (#1). These also ground the enrichment below,
+  //     so the AEO Q&A reflect real buyer concerns, not the model's guesses.
+  await storeReviews(productId, crawled.reviews);
+
   // 2) AEO + GEO in ONE grounded LLM call (GEO rewrite + use-cases + AEO Q&A).
   //    Combining them halves the per-product model latency.
   onProgress({ phase: "enrich", message: "Generating AEO + GEO…", productId });
@@ -159,11 +164,18 @@ export async function ingestProduct(
   if (enrich.use_cases.length > 0) {
     await pool.query(`UPDATE products SET use_cases = $1 WHERE id = $2`, [enrich.use_cases, productId]);
   }
-  await storeAeo(productId, enrich.qa);
+  // storeAeo returns the inserted row ids, aligned with enrich.qa, so the embedded
+  // faq chunks can link back to their source Q&A (powers the #6 direct-answer path).
+  const aeoIds = await storeAeo(productId, enrich.qa);
+
+  // 2b) Generate + store schema.org JSON-LD (#4) — Product + FAQPage assembled
+  //     deterministically from grounded facts + the AEO Q&A. An exportable asset.
+  const jsonld = buildJsonLd(crawled, enrich.qa);
+  await pool.query(`UPDATE products SET jsonld = $1 WHERE id = $2`, [JSON.stringify(jsonld), productId]);
 
   // 3) Build semantic chunks, embed in one batch, replace this product's vectors.
   onProgress({ phase: "embed", message: "Embedding semantic content…", productId });
-  const chunks = buildChunks(crawled, enrich.rewritten_description, enrich.qa);
+  const chunks = buildChunks(crawled, enrich.rewritten_description, enrich.qa, aeoIds);
   await embedAndStore(productId, chunks);
 
   onProgress({ phase: "done", message: `Ingested "${crawled.title}"`, productId });
@@ -206,16 +218,32 @@ async function upsertProduct(p: CrawledProduct): Promise<number> {
   return rows[0].id as number;
 }
 
-/** Replace this product's AEO answers (delete + insert, so re-ingest is clean). */
-async function storeAeo(productId: number, qa: AeoPair[]): Promise<void> {
-  await pool.query(`DELETE FROM aeo_answers WHERE product_id = $1`, [productId]);
-  for (const item of qa) {
+/** Replace this product's buyer reviews (delete + insert, so re-ingest is clean). */
+async function storeReviews(productId: number, reviews: CrawledReview[]): Promise<void> {
+  await pool.query(`DELETE FROM reviews WHERE product_id = $1`, [productId]);
+  for (const r of reviews) {
     await pool.query(
-      `INSERT INTO aeo_answers (product_id, question, answer, answer_type)
-       VALUES ($1,$2,$3,$4)`,
-      [productId, item.question, item.answer, item.answer_type]
+      `INSERT INTO reviews (product_id, rating, title, body) VALUES ($1,$2,$3,$4)`,
+      [productId, r.rating, r.title, r.body]
     );
   }
+}
+
+/** Replace this product's AEO answers (delete + insert, so re-ingest is clean).
+ *  Returns the inserted row ids in the SAME order as `qa`, so the caller can link
+ *  each embedded faq chunk to its source Q&A (#6 direct-answer). */
+async function storeAeo(productId: number, qa: AeoPair[]): Promise<number[]> {
+  await pool.query(`DELETE FROM aeo_answers WHERE product_id = $1`, [productId]);
+  const ids: number[] = [];
+  for (const item of qa) {
+    const { rows } = await pool.query(
+      `INSERT INTO aeo_answers (product_id, question, answer, answer_type)
+       VALUES ($1,$2,$3,$4) RETURNING id`,
+      [productId, item.question, item.answer, item.answer_type]
+    );
+    ids.push(rows[0].id as number);
+  }
+  return ids;
 }
 
 /** Embed all chunk contents in one batch, then replace this product's vectors. */
@@ -231,9 +259,9 @@ async function embedAndStore(productId: number, chunks: Chunk[]): Promise<void> 
       // pgvector accepts a text literal like "[0.1,0.2,...]"; cast it explicitly.
       const literal = `[${vectors[i].join(",")}]`;
       await client.query(
-        `INSERT INTO embeddings (product_id, chunk_type, content, embedding)
-         VALUES ($1,$2,$3,$4::vector)`,
-        [productId, chunks[i].chunk_type, chunks[i].content, literal]
+        `INSERT INTO embeddings (product_id, chunk_type, content, embedding, aeo_answer_id)
+         VALUES ($1,$2,$3,$4::vector,$5)`,
+        [productId, chunks[i].chunk_type, chunks[i].content, literal, chunks[i].aeo_answer_id ?? null]
       );
     }
     await client.query("COMMIT");
@@ -258,15 +286,91 @@ interface AeoPair {
 /** Compact, factual context block the model is allowed to use — nothing else. */
 function factsBlock(p: CrawledProduct): string {
   const specs = p.specs.map((s) => `${s.name}: ${s.value}`).join("; ");
+  // Real buyer quotes (#1): these let the AEO Q&A target genuine concerns/praise
+  // ("is it sturdy?", "good for small spaces") instead of invented questions.
+  const reviewQuotes = p.reviews
+    .slice(0, 8)
+    .map((r) => `- ${r.body}`)
+    .join("\n");
   return [
     `Title: ${p.title}`,
     p.brand ? `Brand: ${p.brand}` : "",
     p.description ? `Description: ${p.description}` : "",
     specs ? `Specs: ${specs}` : "",
     p.rating_avg != null ? `Rating: ${p.rating_avg} from ${p.rating_count} reviews` : "",
+    reviewQuotes
+      ? `Buyer reviews (real quotes — use these to shape questions and reflect common ` +
+        `concerns/praise; do NOT state facts that aren't supported here or above):\n${reviewQuotes}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * buildJsonLd — assemble schema.org Product + FAQPage JSON-LD (#4).
+ *
+ * Deterministic: every value traces to a crawled fact or a grounded AEO answer — no
+ * model call, nothing invented. This is the exportable "answer-engine asset": exactly
+ * the markup Google SGE / Perplexity ingest, so a retailer could publish it as-is.
+ * The two objects are wrapped in an @graph so it's one pasteable block.
+ */
+function buildJsonLd(p: CrawledProduct, qa: AeoPair[]): unknown {
+  const product: Record<string, unknown> = {
+    "@type": "Product",
+    name: p.title,
+    url: p.source_url,
+    ...(p.brand ? { brand: { "@type": "Brand", name: p.brand } } : {}),
+    ...(p.sku ? { sku: p.sku } : {}),
+    ...(p.description ? { description: p.description } : {}),
+    ...(p.image ? { image: p.image } : {}),
+    ...(p.specs.length
+      ? {
+          additionalProperty: p.specs.map((s) => ({
+            "@type": "PropertyValue",
+            name: s.name,
+            value: s.value,
+          })),
+        }
+      : {}),
+    ...(p.price_cents != null
+      ? {
+          offers: {
+            "@type": "Offer",
+            price: (p.price_cents / 100).toFixed(2),
+            priceCurrency: p.currency || "USD",
+            url: p.source_url,
+            ...(p.in_stock === true
+              ? { availability: "https://schema.org/InStock" }
+              : p.in_stock === false
+              ? { availability: "https://schema.org/OutOfStock" }
+              : {}),
+          },
+        }
+      : {}),
+    ...(p.rating_avg != null
+      ? {
+          aggregateRating: {
+            "@type": "AggregateRating",
+            ratingValue: p.rating_avg,
+            ...(p.rating_count != null ? { reviewCount: p.rating_count } : {}),
+          },
+        }
+      : {}),
+  };
+
+  const graph: unknown[] = [product];
+  if (qa.length) {
+    graph.push({
+      "@type": "FAQPage",
+      mainEntity: qa.map((x) => ({
+        "@type": "Question",
+        name: x.question,
+        acceptedAnswer: { "@type": "Answer", text: x.answer },
+      })),
+    });
+  }
+  return { "@context": "https://schema.org", "@graph": graph };
 }
 
 interface Enrichment {
@@ -289,7 +393,8 @@ async function generateEnrichment(p: CrawledProduct): Promise<Enrichment> {
       "(1) rewritten_description: entity-rich copy dense with attributes, materials, audience, " +
       "and concrete use-cases; " +
       "(2) use_cases: an array of short concrete use-cases; " +
-      "(3) qa: 5-6 grounded shopper question/answer pairs — for questions needing price or " +
+      "(3) qa: 5-6 grounded shopper question/answer pairs — when buyer reviews are provided, " +
+      "prioritize the real concerns and praise they raise; for questions needing price or " +
       "live stock, answer generally and note they are confirmed live at answer-time; vary " +
       "answer_type (availability, sizing, spec, usecase, returns, care). " +
       'Return JSON: {"rewritten_description": string, "use_cases": string[], ' +
@@ -326,20 +431,27 @@ async function generateEnrichment(p: CrawledProduct): Promise<Enrichment> {
 interface Chunk {
   chunk_type: string;
   content: string;
+  aeo_answer_id?: number | null; // set only for faq chunks → links to aeo_answers (#6)
 }
 
 function specsToText(specs: ProductSpec[]): string {
   return specs.map((s) => `${s.name}: ${s.value}`).join("; ");
 }
 
-/** Build the per-product embedding chunks, keyed by facet for targeted retrieval. */
-function buildChunks(p: CrawledProduct, geoRewrite: string, qa: AeoPair[]): Chunk[] {
+/** Build the per-product embedding chunks, keyed by facet for targeted retrieval.
+ *  `aeoIds` aligns 1:1 with `qa`, so each faq chunk records which aeo_answers row it
+ *  came from (used by the #6 direct-answer short-circuit at query time). */
+function buildChunks(p: CrawledProduct, geoRewrite: string, qa: AeoPair[], aeoIds: number[] = []): Chunk[] {
   const chunks: Chunk[] = [];
   if (p.description) chunks.push({ chunk_type: "description", content: p.description });
   if (geoRewrite) chunks.push({ chunk_type: "geo_content", content: geoRewrite });
   if (p.specs.length > 0) chunks.push({ chunk_type: "spec", content: specsToText(p.specs) });
-  for (const item of qa) {
-    chunks.push({ chunk_type: "faq", content: `${item.question} ${item.answer}` });
-  }
+  qa.forEach((item, i) => {
+    chunks.push({
+      chunk_type: "faq",
+      content: `${item.question} ${item.answer}`,
+      aeo_answer_id: aeoIds[i] ?? null,
+    });
+  });
   return chunks;
 }

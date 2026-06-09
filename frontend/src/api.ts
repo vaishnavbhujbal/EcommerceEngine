@@ -29,9 +29,17 @@ export interface WebInsights {
 //   meta  → intent + product cards (render immediately)
 //   delta → incremental answer text (append for the typewriter effect)
 //   web   → "what the web says" (arrives once the parallel search resolves)
+export interface QuickAnswer {
+  question: string;
+  answer: string;
+  title: string;
+  url: string;
+}
+
 export type ChatEvent =
   | { type: "progress"; phase: string; message: string }
-  | { type: "meta"; intent: string; products: ProductCard[] }
+  | { type: "quick"; quickAnswer: QuickAnswer }
+  | { type: "meta"; intent: string; products: ProductCard[]; jsonld?: unknown | null }
   | { type: "delta"; text: string }
   | { type: "web"; webInsights: WebInsights | null }
   | { type: "error"; message: string }

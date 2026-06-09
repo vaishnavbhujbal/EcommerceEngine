@@ -16,8 +16,11 @@ import {
   Globe,
   ShieldCheck,
   Clock,
+  Zap,
+  Code2,
+  Copy,
 } from "lucide-react";
-import { postChat, type ChatEvent, type ProductCard, type WebInsights } from "./api";
+import { postChat, type ChatEvent, type ProductCard, type WebInsights, type QuickAnswer } from "./api";
 
 const SAMPLE_URL = "https://www.ikea.com/";
 
@@ -184,6 +187,51 @@ function Card({ p }: { p: ProductCard }) {
   );
 }
 
+// JsonLdPanel — collapsible, copyable schema.org block (#4). This is the
+// exportable "answer-engine asset" generated from the catalog at ingest time.
+function JsonLdPanel({ data }: { data: unknown }) {
+  const [copied, setCopied] = useState(false);
+  const text = JSON.stringify(data, null, 2);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — ignore */
+    }
+  };
+  return (
+    <details className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+      <summary className="flex cursor-pointer items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-600">
+        <Code2 className="h-4 w-4" /> Structured data (JSON-LD)
+        <span className="ml-1 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-slate-500">
+          exportable · Product + FAQPage
+        </span>
+      </summary>
+      <div className="mt-3">
+        <button
+          onClick={copy}
+          className="mb-2 inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+        >
+          {copied ? (
+            <>
+              <Check className="h-3.5 w-3.5 text-emerald-500" /> Copied
+            </>
+          ) : (
+            <>
+              <Copy className="h-3.5 w-3.5" /> Copy JSON-LD
+            </>
+          )}
+        </button>
+        <pre className="max-h-80 overflow-auto rounded-lg bg-slate-900 p-3 text-[11px] leading-relaxed text-slate-100">
+          {text}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
 export default function App() {
   const [url, setUrl] = useState(SAMPLE_URL);
   const [query, setQuery] = useState("");
@@ -192,6 +240,8 @@ export default function App() {
   const [answer, setAnswer] = useState<string>("");
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [web, setWeb] = useState<WebInsights | null>(null);
+  const [quick, setQuick] = useState<QuickAnswer | null>(null);
+  const [jsonld, setJsonld] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function onAsk() {
@@ -201,14 +251,20 @@ export default function App() {
     setAnswer("");
     setProducts([]);
     setWeb(null);
+    setQuick(null);
+    setJsonld(null);
     setPhase("Starting…");
 
     await postChat({ query: query.trim(), url: url.trim() || undefined }, (e: ChatEvent) => {
       if (e.type === "progress") setPhase(e.message);
-      else if (e.type === "meta") {
+      else if (e.type === "quick") {
+        // Featured-snippet answer — arrives instantly, before the streamed prose.
+        setQuick(e.quickAnswer);
+      } else if (e.type === "meta") {
         // Cards + intent arrive first; render them and clear any prior prose so
         // the incoming deltas stream into a fresh answer.
         setProducts(e.products);
+        setJsonld(e.jsonld ?? null);
         setAnswer("");
       } else if (e.type === "delta") {
         // Append each token — functional update keeps rapid deltas correct.
@@ -303,6 +359,28 @@ export default function App() {
           </div>
         )}
 
+        {/* Quick answer — precomputed AEO snippet, shown instantly */}
+        {quick && (
+          <section className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/70 p-5">
+            <h2 className="mb-1 flex flex-wrap items-center gap-2 text-sm font-bold uppercase tracking-wide text-amber-700">
+              <Zap className="h-4 w-4" /> Quick answer
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-amber-700">
+                precomputed from this catalog
+              </span>
+            </h2>
+            <p className="text-xs font-medium text-amber-800/80">{quick.question}</p>
+            <p className="mt-1 text-[15px] leading-relaxed text-slate-700">{quick.answer}</p>
+            <a
+              href={quick.url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-amber-700 hover:text-amber-800"
+            >
+              {quick.title} <ExternalLink className="h-3 w-3" />
+            </a>
+          </section>
+        )}
+
         {/* Answer */}
         {answer && (
           <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -376,6 +454,9 @@ export default function App() {
             </div>
           </section>
         )}
+
+        {/* Exportable schema.org structured data for the anchor product */}
+        {jsonld != null && <JsonLdPanel data={jsonld} />}
       </div>
     </div>
   );

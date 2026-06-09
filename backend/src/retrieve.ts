@@ -227,11 +227,67 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Direct answer (#6): featured-snippet style — answer straight from a precomputed
+// AEO Q&A when the shopper's question very closely matches one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface DirectAnswer {
+  question: string;
+  answer: string;
+  answer_type: string | null;
+  product_id: number;
+  title: string;
+  source_url: string;
+  distance: number;
+}
+
+// Only fire on a VERY strong query→FAQ match (cosine distance). Above this, the
+// stored Q&A isn't really what was asked, so we fall back to full RAG. Tunable.
+const DIRECT_ANSWER_MAX_DISTANCE = 0.25;
+
+/**
+ * directAnswer — if the query closely matches a precomputed AEO Q&A, return that
+ * answer directly (answer-engine featured-snippet behavior). Returns null when no
+ * stored question is a close enough match. Requires faq chunks linked to their
+ * aeo_answers row (embeddings.aeo_answer_id), i.e. products ingested post-migration.
+ */
+export async function directAnswer(query: string): Promise<DirectAnswer | null> {
+  const [queryVec] = await embed([query]);
+  const literal = toVectorLiteral(queryVec);
+  const { rows } = await pool.query(
+    `SELECT a.question, a.answer, a.answer_type,
+            p.id AS product_id, p.title, p.source_url,
+            (e.embedding <=> $1::vector) AS distance
+     FROM embeddings e
+     JOIN aeo_answers a ON a.id = e.aeo_answer_id
+     JOIN products p ON p.id = e.product_id
+     WHERE e.chunk_type = 'faq' AND e.aeo_answer_id IS NOT NULL
+     ORDER BY e.embedding <=> $1::vector
+     LIMIT 1`,
+    [literal]
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  const distance = Number(r.distance);
+  if (distance > DIRECT_ANSWER_MAX_DISTANCE) return null;
+  return {
+    question: r.question,
+    answer: r.answer,
+    answer_type: r.answer_type ?? null,
+    product_id: Number(r.product_id),
+    title: r.title,
+    source_url: r.source_url,
+    distance,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Anchor product (the URL the user supplied)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AnchorProduct extends RetrievedProduct {
   aeo: Array<{ question: string; answer: string; answer_type: string }>;
+  jsonld: unknown | null; // generated schema.org Product + FAQPage (#4), if present
 }
 
 /**
@@ -241,7 +297,7 @@ export interface AnchorProduct extends RetrievedProduct {
 export async function getProductByUrl(url: string): Promise<AnchorProduct | null> {
   const { rows } = await pool.query(
     `SELECT id, source_url, title, brand, description, price_cents, currency,
-            in_stock, rating_avg, rating_count, use_cases, attributes, crawled_at
+            in_stock, rating_avg, rating_count, use_cases, attributes, crawled_at, jsonld
      FROM products WHERE source_url = $1`,
     [url]
   );
@@ -271,6 +327,7 @@ export async function getProductByUrl(url: string): Promise<AnchorProduct | null
     distance: null,
     crawled_at: toIso(r.crawled_at),
     aeo: aeo.rows,
+    jsonld: r.jsonld ?? null,
   };
 }
 

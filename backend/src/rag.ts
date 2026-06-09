@@ -11,6 +11,7 @@ import { complete, completeStream, webInsights, type WebInsights } from "./ai.js
 import {
   retrieve,
   getProductByUrl,
+  directAnswer,
   type RetrievedProduct,
   type AnchorProduct,
 } from "./retrieve.js";
@@ -54,7 +55,11 @@ export interface RagAnswer {
 // parallel web search resolves. `progress` carries the pipeline status line.
 export type ChatStreamEvent =
   | { type: "progress"; phase: string; message: string }
-  | { type: "meta"; intent: Intent; products: ProductCard[] }
+  // `quick` is a precomputed AEO answer (featured snippet), emitted instantly when the
+  // question strongly matches a stored Q&A. `jsonld` rides along on meta (the anchor's
+  // exportable schema.org block).
+  | { type: "quick"; quickAnswer: { question: string; answer: string; title: string; url: string } }
+  | { type: "meta"; intent: Intent; products: ProductCard[]; jsonld?: unknown | null }
   | { type: "delta"; text: string }
   | { type: "web"; webInsights: WebInsights | null };
 
@@ -156,6 +161,21 @@ export async function answer(
   const intent = classifyIntent(query);
   onProgress({ phase: "plan", message: `Intent: ${intent}` });
 
+  // #6 — featured-snippet: if the question very closely matches a precomputed AEO
+  // Q&A, surface it instantly (no LLM latency) while the full answer still streams
+  // below. Never let this optional path break the main answer.
+  try {
+    const direct = await directAnswer(query);
+    if (direct) {
+      emit({
+        type: "quick",
+        quickAnswer: { question: direct.question, answer: direct.answer, title: direct.title, url: direct.source_url },
+      });
+    }
+  } catch {
+    /* ignore — fall through to full RAG */
+  }
+
   // Detect which store this URL belongs to (IKEA / any Shopify store / generic).
   const adapter = url ? await getAdapter(url) : null;
   const storeName = adapter?.name ?? "the store";
@@ -227,8 +247,9 @@ export async function answer(
   }
 
   // Cards are fully known now — push them first so the UI renders the products
-  // immediately while the prose below streams in.
-  emit({ type: "meta", intent, products: cards });
+  // immediately while the prose below streams in. The anchor's JSON-LD (#4) rides
+  // along so the UI can offer the exportable schema.org block.
+  emit({ type: "meta", intent, products: cards, jsonld: anchor?.jsonld ?? null });
 
   // Focus the web search on the actual product (its title), not just the raw
   // question — otherwise "is this sturdy?" can drift to a different product.
